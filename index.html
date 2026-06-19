@@ -1,0 +1,1069 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#02030d" />
+  <link rel="manifest" href="./manifest.json" />
+  <title>운석 피하기</title>
+  <style>
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      min-height: 100dvh;
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+      overscroll-behavior: none;
+      touch-action: none;
+      user-select: none;
+    }
+
+    canvas {
+      position: fixed;
+      inset: 0;
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      height: 100dvh;
+      background: #000;
+    }
+
+    .touch-controls {
+      position: fixed;
+      right: 0;
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+      left: 0;
+      z-index: 2;
+      display: none;
+      justify-content: center;
+      gap: clamp(18px, 8vw, 44px);
+      padding: 0 20px;
+      pointer-events: none;
+    }
+
+    .touch-button {
+      width: clamp(92px, 30vw, 136px);
+      height: clamp(72px, 13dvh, 96px);
+      border: 1px solid rgba(98, 217, 255, 0.72);
+      border-radius: 8px;
+      background: rgba(2, 3, 13, 0.68);
+      box-shadow: 0 0 24px rgba(98, 217, 255, 0.22), inset 0 0 18px rgba(255, 91, 211, 0.18);
+      color: #ffffff;
+      cursor: pointer;
+      font-family: Arial, sans-serif;
+      font-size: clamp(34px, 10vw, 46px);
+      font-weight: 800;
+      line-height: 1;
+      pointer-events: auto;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: none;
+    }
+
+    .touch-button:active {
+      background: rgba(98, 217, 255, 0.22);
+      transform: translateY(2px);
+    }
+
+    .touch-button:focus-visible {
+      outline: 2px solid #ffd166;
+      outline-offset: 4px;
+    }
+
+    .audio-toggle {
+      position: fixed;
+      top: calc(env(safe-area-inset-top, 0px) + 16px);
+      right: calc(env(safe-area-inset-right, 0px) + 16px);
+      z-index: 3;
+      width: 52px;
+      height: 52px;
+      border: 1px solid rgba(255, 209, 102, 0.75);
+      border-radius: 8px;
+      background: rgba(2, 3, 13, 0.68);
+      box-shadow: 0 0 22px rgba(255, 209, 102, 0.22), inset 0 0 16px rgba(98, 217, 255, 0.14);
+      color: #ffffff;
+      cursor: pointer;
+      font-size: 26px;
+      line-height: 1;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: none;
+    }
+
+    .audio-toggle:active {
+      background: rgba(255, 209, 102, 0.22);
+      transform: translateY(2px);
+    }
+
+    .audio-toggle:focus-visible {
+      outline: 2px solid #62d9ff;
+      outline-offset: 4px;
+    }
+
+    @media (pointer: coarse), (max-width: 768px) {
+      .touch-controls {
+        display: flex;
+      }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+  <button class="audio-toggle" type="button" aria-label="음소거" aria-pressed="false" title="음소거">🔊</button>
+  <div class="touch-controls" aria-label="터치 이동 조작">
+    <button class="touch-button" type="button" data-direction="left" aria-label="왼쪽으로 이동">◀</button>
+    <button class="touch-button" type="button" data-direction="right" aria-label="오른쪽으로 이동">▶</button>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    const audioToggleButton = document.querySelector(".audio-toggle");
+    const touchControls = document.querySelector(".touch-controls");
+    const touchButtons = Array.from(document.querySelectorAll(".touch-button"));
+
+    const keys = {
+      ArrowLeft: false,
+      ArrowRight: false
+    };
+    const pointerInputs = new Map();
+
+    const BEST_SCORE_KEY = "spaceShipBestScore";
+    const NEON_COLORS = ["#62d9ff", "#ff5bd3", "#ffd166", "#ffffff"];
+    const bgmSound = new Audio("sounds/bgm.mp3");
+    const boomSound = new Audio("sounds/boom.mp3");
+    const shipSprite = createSprite("images/ship.png", { x: 584, y: 198, width: 343, height: 615 });
+    const rockSprites = [
+      createSprite("images/rock02.png", { x: 406, y: 207, width: 891, height: 566 }),
+      createSprite("images/rock03.png", { x: 432, y: 251, width: 838, height: 514 }),
+      createSprite("images/rock04.png", { x: 506, y: 269, width: 693, height: 472 })
+    ];
+
+    const ship = {
+      x: 0,
+      y: 0,
+      width: 34,
+      height: 42,
+      spriteHeight: 86,
+      spriteOffsetY: 2,
+      speed: 420
+    };
+
+    let stars = [];
+    let meteors = [];
+    let particles = [];
+    let meteorSpawnTimer = 0;
+    let shakeTime = 0;
+    let shakeDuration = 0.28;
+    let shakeMagnitude = 10;
+    let score = 0;
+    let bestScore = loadBestScore();
+    let gameOver = false;
+    let lastTime = 0;
+    let viewportWidth = window.innerWidth;
+    let viewportHeight = window.innerHeight;
+    let audioActivated = false;
+    let soundMuted = false;
+
+    bgmSound.loop = true;
+    bgmSound.volume = 0.18;
+    bgmSound.preload = "auto";
+    boomSound.volume = 0.72;
+    boomSound.preload = "auto";
+
+    function syncViewportSize() {
+      viewportWidth = Math.max(1, canvas.clientWidth || window.innerWidth);
+      viewportHeight = Math.max(1, canvas.clientHeight || window.innerHeight);
+    }
+
+    function getControlReserve() {
+      if (!touchControls) {
+        return 72;
+      }
+
+      const controlsRect = touchControls.getBoundingClientRect();
+      const bottomGap = Math.max(0, viewportHeight - controlsRect.bottom);
+      return controlsRect.height > 0 ? controlsRect.height + bottomGap + 57 : 72;
+    }
+
+    function getShipY() {
+      return viewportHeight - getControlReserve();
+    }
+
+    function createSprite(src, crop) {
+      const image = new Image();
+      const sprite = {
+        image,
+        src,
+        crop: null,
+        ready: false,
+        failed: false
+      };
+
+      image.onload = () => {
+        sprite.crop = getSpriteCrop(image, crop);
+        sprite.ready = true;
+      };
+
+      image.onerror = () => {
+        sprite.failed = true;
+      };
+
+      image.src = src;
+      return sprite;
+    }
+
+    function getSpriteCrop(image, crop) {
+      const naturalWidth = image.naturalWidth || image.width;
+      const naturalHeight = image.naturalHeight || image.height;
+
+      if (!crop) {
+        return { x: 0, y: 0, width: naturalWidth, height: naturalHeight };
+      }
+
+      const x = clamp(crop.x, 0, naturalWidth);
+      const y = clamp(crop.y, 0, naturalHeight);
+      const width = clamp(crop.width, 1, Math.max(1, naturalWidth - x));
+      const height = clamp(crop.height, 1, Math.max(1, naturalHeight - y));
+
+      return { x, y, width, height };
+    }
+
+    function isSpriteReady(sprite) {
+      return Boolean(sprite && sprite.ready && !sprite.failed && sprite.crop);
+    }
+
+    function getSpriteAspect(sprite) {
+      if (!isSpriteReady(sprite)) {
+        return 1;
+      }
+
+      return sprite.crop.width / sprite.crop.height;
+    }
+
+    function drawSpriteCentered(sprite, x, y, options = {}) {
+      if (!isSpriteReady(sprite)) {
+        return false;
+      }
+
+      const aspect = getSpriteAspect(sprite);
+      let drawWidth = options.width || 0;
+      let drawHeight = options.height || 0;
+
+      if (!drawWidth && drawHeight) {
+        drawWidth = drawHeight * aspect;
+      }
+
+      if (!drawHeight && drawWidth) {
+        drawHeight = drawWidth / aspect;
+      }
+
+      if (!drawWidth || !drawHeight) {
+        return false;
+      }
+
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(options.rotation || 0);
+
+      if (options.shadowColor) {
+        ctx.shadowColor = options.shadowColor;
+        ctx.shadowBlur = options.shadowBlur || 0;
+      }
+
+      ctx.drawImage(
+        sprite.image,
+        sprite.crop.x,
+        sprite.crop.y,
+        sprite.crop.width,
+        sprite.crop.height,
+        -drawWidth / 2,
+        -drawHeight / 2,
+        drawWidth,
+        drawHeight
+      );
+      ctx.restore();
+
+      return true;
+    }
+
+    function updateAudioButton() {
+      if (!audioToggleButton) {
+        return;
+      }
+
+      audioToggleButton.textContent = soundMuted ? "🔇" : "🔊";
+      audioToggleButton.setAttribute("aria-pressed", String(soundMuted));
+      audioToggleButton.setAttribute("aria-label", soundMuted ? "소리 켜기" : "음소거");
+      audioToggleButton.title = soundMuted ? "소리 켜기" : "음소거";
+    }
+
+    function safelyPlay(sound) {
+      try {
+        const playPromise = sound.play();
+
+        if (playPromise) {
+          playPromise.catch(() => {});
+        }
+      } catch (error) {
+        // Browser autoplay policies can block sound until a user gesture.
+      }
+    }
+
+    function ensureBgmPlaying() {
+      if (soundMuted) {
+        return;
+      }
+
+      bgmSound.muted = false;
+      safelyPlay(bgmSound);
+    }
+
+    function activateAudio() {
+      audioActivated = true;
+      ensureBgmPlaying();
+    }
+
+    function setSoundMuted(muted) {
+      soundMuted = muted;
+      bgmSound.muted = muted;
+      boomSound.muted = muted;
+
+      if (soundMuted) {
+        bgmSound.pause();
+      } else if (audioActivated) {
+        ensureBgmPlaying();
+      }
+
+      updateAudioButton();
+    }
+
+    function toggleSoundMuted() {
+      audioActivated = true;
+      setSoundMuted(!soundMuted);
+    }
+
+    function playBoomSound() {
+      if (soundMuted) {
+        return;
+      }
+
+      try {
+        boomSound.currentTime = 0;
+      } catch (error) {
+        // Resetting currentTime can fail while the file is still loading.
+      }
+
+      safelyPlay(boomSound);
+    }
+
+    function resizeCanvas() {
+      syncViewportSize();
+      const pixelRatio = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(viewportWidth * pixelRatio);
+      canvas.height = Math.floor(viewportHeight * pixelRatio);
+      ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+
+      ship.x = clamp(ship.x || viewportWidth / 2, ship.width / 2, viewportWidth - ship.width / 2);
+      ship.y = getShipY();
+      createStars();
+    }
+
+    function createStars() {
+      const count = Math.max(90, Math.floor((viewportWidth * viewportHeight) / 9000));
+      stars = Array.from({ length: count }, () => ({
+        x: Math.random() * viewportWidth,
+        y: Math.random() * viewportHeight,
+        radius: Math.random() * 1.6 + 0.3,
+        speed: Math.random() * 30 + 12,
+        alpha: Math.random() * 0.5 + 0.35,
+        twinkleAmount: Math.random() * 0.35 + 0.15,
+        twinklePhase: Math.random() * Math.PI * 2,
+        twinkleSpeed: Math.random() * 3 + 1.4,
+        color: NEON_COLORS[Math.floor(Math.random() * NEON_COLORS.length)]
+      }));
+    }
+
+    function getDifficultyLevel() {
+      return Math.min(score / 12, 8);
+    }
+
+    function getMeteorSpawnDelay() {
+      const difficulty = getDifficultyLevel();
+      const minDelay = Math.max(0.15, 0.35 - difficulty * 0.025);
+      const maxDelay = Math.max(0.4, 1.05 - difficulty * 0.08);
+
+      return Math.random() * (maxDelay - minDelay) + minDelay;
+    }
+
+    function getRockSprite(radius) {
+      if (radius >= 20) {
+        return rockSprites[0];
+      }
+
+      if (radius >= 15) {
+        return rockSprites[1];
+      }
+
+      return rockSprites[2];
+    }
+
+    function spawnMeteor() {
+      const radius = Math.random() * 14 + 10;
+      const difficulty = getDifficultyLevel();
+      const rotationDirection = Math.random() < 0.5 ? -1 : 1;
+
+      meteors.push({
+        x: Math.random() * (viewportWidth - radius * 2) + radius,
+        y: -radius,
+        radius,
+        sprite: getRockSprite(radius),
+        rotation: Math.random() * Math.PI * 2,
+        rotationSpeed: (Math.random() * 0.9 + 0.35) * rotationDirection,
+        speed: Math.random() * (140 + difficulty * 18) + 120 + difficulty * 28
+      });
+    }
+
+    function createExplosion(x, y) {
+      particles = [];
+
+      for (let index = 0; index < 58; index++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 260 + 90;
+        const color = NEON_COLORS[Math.floor(Math.random() * NEON_COLORS.length)];
+
+        particles.push({
+          x,
+          y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          radius: Math.random() * 4 + 2,
+          life: Math.random() * 0.45 + 0.45,
+          maxLife: 0,
+          color
+        });
+      }
+
+      for (const particle of particles) {
+        particle.maxLife = particle.life;
+      }
+    }
+
+    function loadBestScore() {
+      try {
+        const storedScore = Number(window.localStorage.getItem(BEST_SCORE_KEY));
+        return Number.isFinite(storedScore) ? Math.floor(storedScore) : 0;
+      } catch (error) {
+        return 0;
+      }
+    }
+
+    function saveBestScore() {
+      try {
+        window.localStorage.setItem(BEST_SCORE_KEY, String(Math.floor(bestScore)));
+      } catch (error) {
+        // The game should keep running even if browser storage is unavailable.
+      }
+    }
+
+    function formatScore(value) {
+      return String(Math.floor(value));
+    }
+
+    function resetGame() {
+      keys.ArrowLeft = false;
+      keys.ArrowRight = false;
+      pointerInputs.clear();
+      ship.x = viewportWidth / 2;
+      ship.y = getShipY();
+      meteors = [];
+      meteorSpawnTimer = 0.6;
+      score = 0;
+      particles = [];
+      shakeTime = 0;
+      gameOver = false;
+      createStars();
+      ensureBgmPlaying();
+    }
+
+    function endGame() {
+      if (gameOver) {
+        return;
+      }
+
+      gameOver = true;
+      keys.ArrowLeft = false;
+      keys.ArrowRight = false;
+      pointerInputs.clear();
+      shakeTime = shakeDuration;
+      createExplosion(ship.x, ship.y);
+      playBoomSound();
+
+      const finalScore = Math.floor(score);
+      if (finalScore > bestScore) {
+        bestScore = finalScore;
+        saveBestScore();
+      }
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(Math.max(value, min), max);
+    }
+
+    function isShipHit(meteor) {
+      const shipLeft = ship.x - ship.width / 2;
+      const shipRight = ship.x + ship.width / 2;
+      const shipTop = ship.y - ship.height / 2;
+      const shipBottom = ship.y + ship.height / 2;
+      const nearestX = clamp(meteor.x, shipLeft, shipRight);
+      const nearestY = clamp(meteor.y, shipTop, shipBottom);
+      const distanceX = meteor.x - nearestX;
+      const distanceY = meteor.y - nearestY;
+
+      return distanceX * distanceX + distanceY * distanceY <= meteor.radius * meteor.radius;
+    }
+
+    function setFittedFont(text, size, weight = "") {
+      const maxWidth = Math.max(viewportWidth - 40, 80);
+      let fontSize = size;
+
+      while (fontSize > 14) {
+        ctx.font = `${weight}${fontSize}px Arial, sans-serif`;
+        if (ctx.measureText(text).width <= maxWidth) {
+          return;
+        }
+        fontSize -= 2;
+      }
+
+      ctx.font = `${weight}14px Arial, sans-serif`;
+    }
+
+    function updateEffects(deltaSeconds) {
+      for (const star of stars) {
+        star.twinklePhase += star.twinkleSpeed * deltaSeconds;
+      }
+
+      if (shakeTime > 0) {
+        shakeTime = Math.max(0, shakeTime - deltaSeconds);
+      }
+
+      for (let index = particles.length - 1; index >= 0; index--) {
+        const particle = particles[index];
+        particle.life -= deltaSeconds;
+        particle.x += particle.vx * deltaSeconds;
+        particle.y += particle.vy * deltaSeconds;
+        particle.vx *= 0.985;
+        particle.vy = particle.vy * 0.985 + 32 * deltaSeconds;
+
+        if (particle.life <= 0) {
+          particles.splice(index, 1);
+        }
+      }
+    }
+
+    function getShakeOffset() {
+      if (shakeTime <= 0) {
+        return { x: 0, y: 0 };
+      }
+
+      const strength = (shakeTime / shakeDuration) * shakeMagnitude;
+      return {
+        x: (Math.random() * 2 - 1) * strength,
+        y: (Math.random() * 2 - 1) * strength
+      };
+    }
+
+    function update(deltaSeconds) {
+      score += deltaSeconds;
+
+      const movingLeft = keys.ArrowLeft || isPointerDirectionActive("left");
+      const movingRight = keys.ArrowRight || isPointerDirectionActive("right");
+
+      if (movingLeft) {
+        ship.x -= ship.speed * deltaSeconds;
+      }
+
+      if (movingRight) {
+        ship.x += ship.speed * deltaSeconds;
+      }
+
+      ship.x = clamp(ship.x, ship.width / 2, viewportWidth - ship.width / 2);
+      ship.y = getShipY();
+
+      for (const star of stars) {
+        star.y += star.speed * deltaSeconds;
+        if (star.y > viewportHeight) {
+          star.x = Math.random() * viewportWidth;
+          star.y = -4;
+        }
+      }
+
+      meteorSpawnTimer -= deltaSeconds;
+      if (meteorSpawnTimer <= 0) {
+        spawnMeteor();
+        meteorSpawnTimer = getMeteorSpawnDelay();
+      }
+
+      for (let index = meteors.length - 1; index >= 0; index--) {
+        const meteor = meteors[index];
+        meteor.y += meteor.speed * deltaSeconds;
+        meteor.rotation += meteor.rotationSpeed * deltaSeconds;
+
+        if (meteor.y - meteor.radius > viewportHeight) {
+          meteors.splice(index, 1);
+          continue;
+        }
+
+        if (isShipHit(meteor)) {
+          endGame();
+          break;
+        }
+      }
+    }
+
+    function drawBackground() {
+      const background = ctx.createLinearGradient(0, 0, viewportWidth, viewportHeight);
+      background.addColorStop(0, "#02030d");
+      background.addColorStop(0.45, "#090016");
+      background.addColorStop(1, "#00131a");
+      ctx.fillStyle = background;
+      ctx.fillRect(0, 0, viewportWidth, viewportHeight);
+
+      ctx.save();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "rgba(98, 217, 255, 0.06)";
+      for (let x = 0; x < viewportWidth; x += 72) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, viewportHeight);
+        ctx.stroke();
+      }
+
+      ctx.strokeStyle = "rgba(255, 91, 211, 0.045)";
+      for (let y = 0; y < viewportHeight; y += 72) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(viewportWidth, y);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      for (const star of stars) {
+        const twinkle = Math.sin(star.twinklePhase) * star.twinkleAmount;
+        const alpha = clamp(star.alpha + twinkle, 0.14, 1);
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.globalAlpha = alpha;
+        ctx.shadowColor = star.color;
+        ctx.shadowBlur = star.radius > 1.2 ? 8 : 4;
+        ctx.fillStyle = star.color;
+        ctx.arc(star.x, star.y, star.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    function drawMeteorTrail(meteor) {
+      ctx.save();
+
+      const trail = ctx.createLinearGradient(meteor.x, meteor.y - meteor.radius * 4, meteor.x, meteor.y);
+      trail.addColorStop(0, "rgba(255, 91, 211, 0)");
+      trail.addColorStop(0.45, "rgba(255, 91, 211, 0.22)");
+      trail.addColorStop(1, "rgba(98, 217, 255, 0.55)");
+
+      ctx.beginPath();
+      ctx.strokeStyle = trail;
+      ctx.lineWidth = meteor.radius * 0.7;
+      ctx.lineCap = "round";
+      ctx.shadowColor = "#ff5bd3";
+      ctx.shadowBlur = 18;
+      ctx.moveTo(meteor.x, meteor.y - meteor.radius * 4);
+      ctx.lineTo(meteor.x, meteor.y - meteor.radius * 0.45);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function drawMeteorFallback(meteor) {
+      ctx.save();
+
+      const gradient = ctx.createRadialGradient(
+        meteor.x - meteor.radius * 0.35,
+        meteor.y - meteor.radius * 0.35,
+        meteor.radius * 0.2,
+        meteor.x,
+        meteor.y,
+        meteor.radius
+      );
+
+      gradient.addColorStop(0, "#d8d8d8");
+      gradient.addColorStop(0.65, "#8f8f8f");
+      gradient.addColorStop(1, "#4d4d4d");
+
+      ctx.beginPath();
+      ctx.shadowColor = "#62d9ff";
+      ctx.shadowBlur = 14;
+      ctx.fillStyle = gradient;
+      ctx.arc(meteor.x, meteor.y, meteor.radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = "rgba(98, 217, 255, 0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "rgba(55, 55, 55, 0.45)";
+      ctx.arc(meteor.x + meteor.radius * 0.22, meteor.y - meteor.radius * 0.12, meteor.radius * 0.18, 0, Math.PI * 2);
+      ctx.arc(meteor.x - meteor.radius * 0.18, meteor.y + meteor.radius * 0.24, meteor.radius * 0.12, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function drawMeteors() {
+      for (const meteor of meteors) {
+        drawMeteorTrail(meteor);
+
+        const imageDrawn = drawSpriteCentered(meteor.sprite, meteor.x, meteor.y, {
+          width: meteor.radius * 2.65,
+          rotation: meteor.rotation,
+          shadowColor: "#62d9ff",
+          shadowBlur: 14
+        });
+
+        if (!imageDrawn) {
+          drawMeteorFallback(meteor);
+        }
+      }
+    }
+
+    function drawShip() {
+      const imageDrawn = drawSpriteCentered(shipSprite, ship.x, ship.y + ship.spriteOffsetY, {
+        height: ship.spriteHeight,
+        shadowColor: "#62d9ff",
+        shadowBlur: 18
+      });
+
+      if (imageDrawn) {
+        return;
+      }
+
+      ctx.save();
+      ctx.translate(ship.x, ship.y);
+
+      const bodyGradient = ctx.createLinearGradient(0, -ship.height / 2, 0, ship.height / 2);
+      bodyGradient.addColorStop(0, "#ffffff");
+      bodyGradient.addColorStop(0.45, "#bdf6ff");
+      bodyGradient.addColorStop(1, "#2946ff");
+
+      ctx.beginPath();
+      ctx.moveTo(0, -ship.height / 2);
+      ctx.lineTo(ship.width / 2, ship.height / 2);
+      ctx.lineTo(0, ship.height / 3);
+      ctx.lineTo(-ship.width / 2, ship.height / 2);
+      ctx.closePath();
+      ctx.shadowColor = "#62d9ff";
+      ctx.shadowBlur = 22;
+      ctx.fillStyle = bodyGradient;
+      ctx.fill();
+
+      ctx.strokeStyle = "#62d9ff";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.shadowColor = "#ff5bd3";
+      ctx.shadowBlur = 14;
+      ctx.strokeStyle = "#ff5bd3";
+      ctx.lineWidth = 2;
+      ctx.moveTo(0, -ship.height / 2 + 10);
+      ctx.lineTo(0, ship.height / 3);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(-7, ship.height / 2);
+      ctx.lineTo(0, ship.height / 2 + 14);
+      ctx.lineTo(7, ship.height / 2);
+      ctx.closePath();
+      ctx.shadowColor = "#ffd166";
+      ctx.shadowBlur = 20;
+      ctx.fillStyle = "#ffd166";
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(-4, ship.height / 2);
+      ctx.lineTo(0, ship.height / 2 + 24);
+      ctx.lineTo(4, ship.height / 2);
+      ctx.closePath();
+      ctx.fillStyle = "#ff5bd3";
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function drawParticles() {
+      for (const particle of particles) {
+        const alpha = clamp(particle.life / particle.maxLife, 0, 1);
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.shadowColor = particle.color;
+        ctx.shadowBlur = 22;
+        ctx.fillStyle = particle.color;
+        ctx.beginPath();
+        ctx.arc(particle.x, particle.y, particle.radius * (0.6 + alpha), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    function drawScore() {
+      ctx.save();
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.shadowColor = "#62d9ff";
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 34px Arial, sans-serif";
+      ctx.fillText(`SCORE ${formatScore(score)}`, 22, 18);
+      ctx.restore();
+    }
+
+    function drawGameOver() {
+      ctx.save();
+      ctx.fillStyle = "rgba(0, 0, 0, 0.58)";
+      ctx.fillRect(0, 0, viewportWidth, viewportHeight);
+
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.shadowColor = "#62d9ff";
+      ctx.shadowBlur = 18;
+      ctx.fillStyle = "#ffffff";
+      setFittedFont("GAME OVER", 56, "bold ");
+
+      ctx.fillText("GAME OVER", viewportWidth / 2, viewportHeight / 2 - 72);
+
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "#ffffff";
+      setFittedFont(`SCORE ${formatScore(score)}`, 26, "bold ");
+      ctx.fillText(`SCORE ${formatScore(score)}`, viewportWidth / 2, viewportHeight / 2 - 8);
+
+      ctx.fillStyle = "#ffd166";
+      setFittedFont(`BEST ${formatScore(bestScore)}`, 24, "bold ");
+      ctx.fillText(`BEST ${formatScore(bestScore)}`, viewportWidth / 2, viewportHeight / 2 + 28);
+
+      ctx.fillStyle = "#cfefff";
+      setFittedFont("터치 또는 스페이스바로 다시 시작", 20);
+
+      ctx.fillText("터치 또는 스페이스바로 다시 시작", viewportWidth / 2, viewportHeight / 2 + 76);
+      ctx.restore();
+    }
+
+    function getPointerDirection(clientX) {
+      return clientX < viewportWidth / 2 ? "left" : "right";
+    }
+
+    function isPointerDirectionActive(direction) {
+      for (const input of pointerInputs.values()) {
+        if (input.direction === direction) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    function isUiControlTarget(target) {
+      return target instanceof Element && Boolean(target.closest(".touch-button, .audio-toggle"));
+    }
+
+    function restartFromPointerInput() {
+      if (gameOver) {
+        resetGame();
+      }
+    }
+
+    function setPointerInput(pointerId, direction, source) {
+      pointerInputs.set(pointerId, { direction, source });
+    }
+
+    function clearPointerInput(pointerId) {
+      pointerInputs.delete(pointerId);
+    }
+
+    function render(currentTime) {
+      const deltaSeconds = Math.min((currentTime - lastTime) / 1000, 0.04) || 0;
+      lastTime = currentTime;
+
+      if (!gameOver) {
+        update(deltaSeconds);
+      }
+
+      updateEffects(deltaSeconds);
+
+      const shake = getShakeOffset();
+      ctx.save();
+      ctx.translate(shake.x, shake.y);
+      drawBackground();
+      drawMeteors();
+      if (!gameOver) {
+        drawShip();
+      }
+      drawParticles();
+      ctx.restore();
+
+      if (gameOver) {
+        drawGameOver();
+      } else {
+        drawScore();
+      }
+
+      requestAnimationFrame(render);
+    }
+
+    if (audioToggleButton) {
+      audioToggleButton.addEventListener("pointerdown", (event) => {
+        toggleSoundMuted();
+        event.preventDefault();
+        event.stopPropagation();
+      });
+
+      audioToggleButton.addEventListener("pointerup", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+
+      audioToggleButton.addEventListener("pointercancel", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+
+      audioToggleButton.addEventListener("keydown", (event) => {
+        if (event.key === " " || event.key === "Enter") {
+          toggleSoundMuted();
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      });
+    }
+
+    window.addEventListener("keydown", (event) => {
+      activateAudio();
+
+      if (event.code === "Space") {
+        if (gameOver) {
+          resetGame();
+        }
+
+        event.preventDefault();
+        return;
+      }
+
+      if (event.key in keys) {
+        keys[event.key] = true;
+        event.preventDefault();
+      }
+    });
+
+    window.addEventListener("keyup", (event) => {
+      if (event.key in keys) {
+        keys[event.key] = false;
+        event.preventDefault();
+      }
+    });
+
+    for (const button of touchButtons) {
+      button.addEventListener("pointerdown", (event) => {
+        const direction = button.dataset.direction;
+
+        if (!direction) {
+          return;
+        }
+
+        activateAudio();
+        restartFromPointerInput();
+        setPointerInput(event.pointerId, direction, "button");
+        try {
+          button.setPointerCapture(event.pointerId);
+        } catch (error) {
+          // Some browsers can reject capture if the pointer has already ended.
+        }
+        event.preventDefault();
+        event.stopPropagation();
+      });
+
+      button.addEventListener("pointerup", (event) => {
+        clearPointerInput(event.pointerId);
+        event.preventDefault();
+        event.stopPropagation();
+      });
+
+      button.addEventListener("pointercancel", (event) => {
+        clearPointerInput(event.pointerId);
+        event.preventDefault();
+        event.stopPropagation();
+      });
+
+      button.addEventListener("lostpointercapture", (event) => {
+        clearPointerInput(event.pointerId);
+      });
+    }
+
+    window.addEventListener("pointerdown", (event) => {
+      if (isUiControlTarget(event.target)) {
+        return;
+      }
+
+      activateAudio();
+      restartFromPointerInput();
+      setPointerInput(event.pointerId, getPointerDirection(event.clientX), "screen");
+      event.preventDefault();
+    });
+
+    window.addEventListener("pointermove", (event) => {
+      const input = pointerInputs.get(event.pointerId);
+
+      if (!input || input.source !== "screen") {
+        return;
+      }
+
+      input.direction = getPointerDirection(event.clientX);
+      event.preventDefault();
+    });
+
+    window.addEventListener("pointerup", (event) => {
+      clearPointerInput(event.pointerId);
+      event.preventDefault();
+    });
+
+    window.addEventListener("pointercancel", (event) => {
+      clearPointerInput(event.pointerId);
+      event.preventDefault();
+    });
+
+    window.addEventListener("blur", () => {
+      keys.ArrowLeft = false;
+      keys.ArrowRight = false;
+      pointerInputs.clear();
+    });
+
+    window.addEventListener("resize", resizeCanvas);
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", resizeCanvas);
+    }
+
+    resizeCanvas();
+    resetGame();
+    requestAnimationFrame(render);
+
+    if ("serviceWorker" in navigator && window.isSecureContext) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js").catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>
